@@ -1,0 +1,200 @@
+###########################################################################
+# Install‑ComfyUnleashed‑OneShot.ps1 – Kat Edition 💜 (bug‑fixed)
+# Instalación TODO‑EN‑UNO de ComfyUI + SDXL + Juggernaut XL v9 en la carpeta
+# que elijas, con dependencias fijas para RTX 3090 (CUDA 12.1) y sin escribir
+# nada en C:\.  Incluye custom nodes esenciales, cachés redirigidas y un
+# lanzamiento GPU equilibrado (alto rendimiento sin forzar al máximo).
+###########################################################################
+param(
+    [string]$InstallDir = "E:\SDKAT\ComfyUI",   # cambia si quieres
+    [switch]$SkipModels = $false,
+    [switch]$Verbose    = $false,
+    [switch]$PersistEnv = $true
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Status {
+    param($Msg,$Colour="White")
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Msg" -ForegroundColor $Colour
+}
+
+###########################################################################
+# 0 · Redirigir cachés y (opcionalmente) hacerlas permanentes
+###########################################################################
+$env:HF_HOME               = Join-Path $InstallDir ".hf_cache"
+$env:HUGGINGFACE_HUB_CACHE = $env:HF_HOME
+$env:PIP_CACHE_DIR         = Join-Path $InstallDir "pip_cache"
+
+function Persist-EnvVar {
+    param($Name,$Value)
+    Write-Status "Persistiendo $Name…" DarkGray
+    setx $Name "$Value" | Out-Null
+}
+
+if ($PersistEnv) {
+    Persist-EnvVar HF_HOME               $env:HF_HOME
+    Persist-EnvVar HUGGINGFACE_HUB_CACHE $env:HUGGINGFACE_HUB_CACHE
+    Persist-EnvVar PIP_CACHE_DIR         $env:PIP_CACHE_DIR
+    Write-Status "Variables de caché guardadas (reinicia terminal para ver efecto)" Green
+} else {
+    Write-Status "Variables de caché sólo para esta sesión" Yellow
+}
+
+###########################################################################
+# 1 · Dependencias básicas
+###########################################################################
+function Ensure-Cmd {
+    param($Cmd,$WingetId,$Desc)
+    if (-not (Get-Command $Cmd -ErrorAction SilentlyContinue)) {
+        Write-Status "Instalando $Desc…" Cyan
+        winget install --id $WingetId -e --accept-package-agreements --accept-source-agreements
+    } else {
+        Write-Status "$Desc ya está instalado" Green
+    }
+}
+
+Ensure-Cmd git    "Git.Git"            "Git"
+Ensure-Cmd python "Python.Python.3.11" "Python 3.11"
+
+if (-not (Get-Command "huggingface-cli" -ErrorAction SilentlyContinue)) {
+    Write-Status "Instalando Hugging Face CLI…" Cyan
+    pip install --upgrade "huggingface-hub[cli]"
+}
+
+###########################################################################
+# 2 · ComfyUI
+###########################################################################
+if (-not (Test-Path $InstallDir)) {
+    Write-Status "Clonando ComfyUI…" Yellow
+    git clone https://github.com/comfyanonymous/ComfyUI.git $InstallDir
+} else {
+    Write-Status "Actualizando ComfyUI…" Yellow
+    git -C $InstallDir pull
+}
+
+###########################################################################
+# 3 · Virtualenv
+###########################################################################
+$Venv = Join-Path $InstallDir "venv"
+if (-not (Test-Path $Venv)) {
+    Write-Status "Creando entorno virtual…" Yellow
+    python -m venv $Venv
+}
+Write-Status "Activando entorno virtual…" Yellow
+& "$Venv\Scripts\Activate.ps1"
+
+###########################################################################
+# 4 · Dependencias de Python fijas
+###########################################################################
+& "$Venv\Scripts\python.exe" -m pip install --upgrade pip wheel setuptools
+
+$torchVer       = "2.5.1+cu121"
+$visionVer      = "0.20.1+cu121"
+$audioVer       = "2.5.1+cu121"
+$pytorchIndex   = "https://download.pytorch.org/whl/cu121"
+
+Write-Status "Instalando PyTorch…" Yellow
+& "$Venv\Scripts\python.exe" -m pip install "torch==$torchVer" "torchvision==$visionVer" "torchaudio==$audioVer" --index-url $pytorchIndex
+
+# Xformers compatible con 2.5.x
+& "$Venv\Scripts\python.exe" -m pip install "xformers==0.0.30" --index-url $pytorchIndex
+
+& "$Venv\Scripts\python.exe" -m pip install accelerate diffusers==0.33.1 transformers==4.52.4 bitsandbytes==0.46.0
+
+& "$Venv\Scripts\python.exe" -m pip install -r "$InstallDir\requirements.txt" --no-deps
+
+###########################################################################
+# 5 · Carpetas
+###########################################################################
+$Dirs = @("checkpoints","vae","loras","embeddings","controlnet","clip","unet") | ForEach-Object { Join-Path $InstallDir "models\$_" }
+$Dirs += @(Join-Path $InstallDir "input",Join-Path $InstallDir "output")
+$Dirs | ForEach-Object { New-Item -ItemType Directory -Path $_ -Force | Out-Null }
+
+###########################################################################
+# 6 · Descarga de modelos
+###########################################################################
+function Download-Model {
+    param($Repo,$Dest,$Name)
+    if (Test-Path $Dest) { Write-Status "$Name ya existe" Green; return }
+    Write-Status "Descargando $Name…" Yellow
+    $LocalDir = Split-Path $Dest
+    $File     = Split-Path $Dest -Leaf
+    & huggingface-cli download $Repo --local-dir "${LocalDir}" --include "${File}" --resume-download $(if(-not $Verbose){"--quiet"})
+    Write-Status "$Name descargado" Green
+}
+
+if (-not $SkipModels) {
+    Download-Model "stabilityai/stable-diffusion-xl-base-1.0"    (Join-Path $InstallDir "models\checkpoints\sd_xl_base_1.0.safetensors")    "SDXL Base"
+    Download-Model "stabilityai/stable-diffusion-xl-refiner-1.0" (Join-Path $InstallDir "models\checkpoints\sd_xl_refiner_1.0.safetensors") "SDXL Refiner"
+    Download-Model "RunDiffusion/juggernaut-xl-v9"               (Join-Path $InstallDir "models\checkpoints\juggernaut_xl_v9.safetensors")  "Juggernaut XL v9"
+    Download-Model "madebyollin/sdxl-vae-fp16-fix"               (Join-Path $InstallDir "models\vae\sdxl_vae.safetensors")                  "SDXL VAE"
+}
+
+###########################################################################
+# 7 · Custom nodes
+###########################################################################
+$Nodes = @{
+    "ComfyUI-Manager"          = "https://github.com/ltdrdata/ComfyUI-Manager.git";
+    "rgthree-comfy"            = "https://github.com/rgthree/rgthree-comfy.git";
+    "efficiency-nodes-comfyui" = "https://github.com/jags111/efficiency-nodes-comfyui.git";
+    "ComfyUI_essentials"       = "https://github.com/cubiq/ComfyUI_essentials.git";
+    "comfyui-tooling-nodes"    = "https://github.com/Acly/comfyui-tooling-nodes.git";
+}
+
+foreach ($n in $Nodes.GetEnumerator()) {
+    $Dir = Join-Path $InstallDir "custom_nodes\$($n.Key)"
+    if (-not (Test-Path $Dir)) {
+        Write-Status "Clonando $($n.Key)…" Cyan
+        git clone $n.Value $Dir
+        if (Test-Path "$Dir\requirements.txt") {
+            & "$Venv\Scripts\python.exe" -m pip install -r "$Dir\requirements.txt" --no-deps
+        }
+    }
+}
+
+###########################################################################
+# 8 · extra_model_paths.yaml
+###########################################################################
+@"
+base_path: $InstallDir\
+checkpoints: models/checkpoints/
+vae: models/vae/
+loras: models/loras/
+embeddings: models/embeddings/
+controlnet: models/controlnet/
+clip: models/clip/
+unet: models/unet/
+"@ | Out-File (Join-Path $InstallDir "extra_model_paths.yaml") -Encoding UTF8
+
+###########################################################################
+# 9 · launch_enhanced.bat
+###########################################################################
+$Launch = @"
+@echo off
+cd /d "%~dp0"
+call venv\Scripts\activate.bat
+set "HF_HOME=%~dp0.hf_cache"
+set "HUGGINGFACE_HUB_CACHE=%HF_HOME%"
+set "PIP_CACHE_DIR=%~dp0pip_cache"
+
+python main.py --auto-launch --highvram --preview-method auto --use-split-cross-attention
+"@
+$Launch | Out-File (Join-Path $InstallDir "launch_enhanced.bat") -Encoding ASCII
+
+###########################################################################
+# 10 · update_enhanced.bat
+###########################################################################
+$Update = @"
+@echo off
+cd /d "%~dp0"
+git pull
+for /d %%i in (custom_nodes\*) do (
+    if exist "%%i\.git" git -C "%%i" pull
+)
+pause
+"@
+$Update | Out-File (Join-Path $InstallDir "update_enhanced.bat") -Encoding ASCII
+
+###########################################################################
+Write-Status "Instalación completada. Ejecuta 'launch_enhanced.bat' para arrancar ComfyUI." Magenta
