@@ -23,7 +23,7 @@ that everything is isolated in the folder of your choice.
    ./Install-ComfyUnleashed-OneShot.ps1
    ```
 
-By default everything will be installed into `E:\SDKAT\ComfyUI`. You can change
+By default everything will be installed into `<InstallDir>`. You can change
 this location using the `-InstallDir` parameter when launching the script.
 
 Once the installation finishes you will find a `launch_enhanced.bat` file inside
